@@ -41,7 +41,8 @@ for _ in $(seq 1 90); do
 done
 inside aula-server status --json >/dev/null 2>&1 || fail "la consola no responde"
 # lo que Aula cuenta en su salida puede llegar al registro un momento después de que la consola responda
-logged() { for _ in $(seq 1 15); do docker logs "$NAME" 2>&1 | grep -q "$1" && return 0; sleep 1; done; return 1; }
+# Consume the entire log: grep -q closes the pipe early, making docker logs fail with SIGPIPE under pipefail.
+logged() { for _ in $(seq 1 15); do docker logs "$NAME" 2>&1 | grep "$1" >/dev/null && return 0; sleep 1; done; return 1; }
 logged "como servidor, sin ventana\|running as a server, without a window" || fail "Aula no dijo que arrancó como servidor"
 ok "Aula arranca sin ventana y su consola responde"
 # si va sin el aislamiento de Chromium, lo dice como lo que es: un contenedor (no un equipo al que le falte la .deb)
@@ -68,7 +69,7 @@ ok "el componente de Tailscale arranca y pide iniciar sesión"
 
 # 3. sin propietario, el registro ya da un código; la consola da otro
 logged "Vincula tu primer dispositivo (será el propietario) con el código [0-9]\{6\}\|Link your first device (it will be the owner) with the code [0-9]\{6\}" || fail "no se ofreció el código del primer propietario"
-code=$(inside aula-server link | sed -n 's/^\(Código de propietario\|Owner code\): \([0-9]\{6\}\)$/\2/p')
+code=$(inside aula-server link | sed -n -e 's/^Código de propietario: \([0-9]\{6\}\)$/\1/p' -e 's/^Owner code: \([0-9]\{6\}\)$/\1/p')
 [ -n "$code" ] || fail "aula-server link no dio un código"
 ok "código de propietario: por el registro y por la consola"
 

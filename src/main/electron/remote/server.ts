@@ -148,8 +148,10 @@ export class RemoteServer {
     const external = this.o.external
     if (!external || (req.headers.host ?? '').toLowerCase() !== external.host) return false
     const got = req.headers[HTTPS_PROXY_KEY_HEADER]
-    return typeof got === 'string' && got.length === external.secret.length &&
-      timingSafeEqual(Buffer.from(got), Buffer.from(external.secret))
+    if (typeof got !== 'string') return false
+    const expected = Buffer.from(external.secret)
+    const supplied = Buffer.from(got)
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected)
   }
 
   /** Only local requests, the verified Tailscale sidecar or the configured HTTPS proxy can reach Aula. */
