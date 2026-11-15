@@ -11,7 +11,7 @@ import type { RemoteStatus } from '@shared/ipc/remote'
 import { aiLocale, tr } from '@shared/ai/i18n'
 import { DeviceRegistry, type RemoteDeviceView } from '@main/services/remote/devices'
 import { UploadStore } from '@main/services/remote/uploads'
-import { isServerMode, serverHostname } from '@main/services/remote/server-mode'
+import { httpsProxySettings, isServerMode, serverHostname } from '@main/services/remote/server-mode'
 import { userFiles } from '@main/services/userFiles'
 import { writeFileAtomic } from '@main/services/fs'
 import { paths } from '@main/services/paths'
@@ -45,6 +45,7 @@ class RemoteAccess {
   private readonly dir = join(paths.root(), 'Remote')
   /** Aula como servidor: sin ventana, el acceso no se apaga y un propietario hace de ventana. */
   readonly headless = isServerMode()
+  private readonly external = this.headless ? httpsProxySettings() : undefined
   private readonly proxyKey = randomBytes(48).toString('base64url')
   private readonly adminToken = this.headless ? randomBytes(32).toString('base64url') : ''
   private readonly devices = new DeviceRegistry(join(this.dir, 'devices.json'))
@@ -54,6 +55,7 @@ class RemoteAccess {
     devices: this.devices, uploads: this.uploads, rendererRoot: rendererRoot(), icon: join(__dirname, '../../resources/icon.png'), language: () => aiLocale(), version: app.getVersion(), proxyKey: this.proxyKey,
     cookieName: `aula_device_${installId(this.dir)}`,
     host: this.headless ? 'server' : 'mac',
+    ...(this.external ? { external: this.external } : {}),
     ...(this.headless ? { admin: { token: this.adminToken, status: () => this.status(), link: (owner: boolean) => this.consoleLink(owner) } } : {}),
     onChange: () => { if (!this.devices.pairingOpen()) this.pairing = undefined; this.changed() }
   })
@@ -76,6 +78,7 @@ class RemoteAccess {
       say(tr(`Aula ${app.getVersion()} como servidor, sin ventana · datos en ${paths.root()}`, `Aula ${app.getVersion()} running as a server, without a window · data in ${paths.root()}`))
       for (const d of this.devices.list()) this.knownDevices.add(d.id)
       await this.setEnabled(true)
+      if (this.external) say(tr(`Acceso HTTPS por proxy: ${this.external.origin} (el proxy debe entregar su clave; Tailscale sigue disponible).`, `HTTPS reverse-proxy access: ${this.external.origin} (the proxy must supply its key; Tailscale remains available).`))
       if (!this.tailnet.available) say(tr('Falta el componente de Tailscale (aula-tsnet): los dispositivos no podrán llegar.', 'The Tailscale component (aula-tsnet) is missing: devices will not be able to reach this server.'))
       // sin propietario todavía: se abre un código de propietario (y otro cuando caduque) hasta que alguien lo use, salvo
       // tras demasiados intentos fallidos (remote/devices.ts): entonces se pide en la consola

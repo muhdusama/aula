@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
 import { DeviceRegistry, MAX_ATTEMPTS, PAIRING_MINUTES, PairingError, TOKEN_DAYS } from './devices'
 import { noopValue, ownerVerdict, remoteAIChoice, remoteCall, remoteForget, remoteSettingsPatch, remoteVerdict, rewriteAssets } from './policy'
-import { hostLabel, installServerCrashHandlers, isAulaHostname, isDeviceHostname, isServerMode, serverHostname } from './server-mode'
+import { hostLabel, httpsProxySettings, installServerCrashHandlers, isAulaHostname, isDeviceHostname, isServerMode, serverHostname } from './server-mode'
 import { safeUploadName, UploadError, UploadStore } from './uploads'
 import { pairingPage, REMOTE_BRIDGE_JS, REMOTE_MANIFEST } from './bridge'
 
@@ -187,6 +187,23 @@ describe('propietario (Aula como servidor)', () => {
     for (const no of ['aula-ipad', 'aula-ipad-2', 'aula-iphone-12', 'aula-android-1', 'aula-device', 'aula-device-7', 'AULA-IPAD', 'aula-ipad.tail1234.ts.net', 'mac', 'aulaserver', 'aula', 'aula-', 'aula--', 'aula-x-', 'aula-ipad-', 'aula_x', 'aula-a_b',
       'aula-caf\u00e9', 'aula-\u2172', 'aula-\u212a', 'aula-' + 'x'.repeat(59), '', '.aula-mac'])
       expect([no, isAulaHostname(no)]).toEqual([no, false])
+  })
+  it('acceso HTTPS opcional: exige URL HTTPS, puerto y un secreto largo; falla cerrado', () => {
+    const ok = { AULA_HTTPS_ORIGIN: 'https://aula.example.test', AULA_HTTPS_PROXY_PORT: '8080', AULA_HTTPS_PROXY_SECRET: 's'.repeat(64) }
+    expect(httpsProxySettings({})).toBeUndefined()
+    expect(httpsProxySettings(ok)).toEqual({ origin: ok.AULA_HTTPS_ORIGIN, host: 'aula.example.test', port: 8080, secret: ok.AULA_HTTPS_PROXY_SECRET })
+    for (const bad of [
+      { ...ok, AULA_HTTPS_ORIGIN: 'http://aula.example.test' },
+      { ...ok, AULA_HTTPS_ORIGIN: 'https://aula.example.test/path' },
+      { ...ok, AULA_HTTPS_ORIGIN: 'https://user:pass@aula.example.test' },
+      { ...ok, AULA_HTTPS_ORIGIN: 'https://aula.example.test?token=foo' },
+      { ...ok, AULA_HTTPS_ORIGIN: '' },
+      { ...ok, AULA_HTTPS_PROXY_PORT: '' },
+      { ...ok, AULA_HTTPS_PROXY_PORT: '80' },
+      { ...ok, AULA_HTTPS_PROXY_PORT: 'invalid' },
+      { ...ok, AULA_HTTPS_PROXY_SECRET: 'short' },
+      { ...ok, AULA_HTTPS_PROXY_SECRET: '' }
+    ]) expect(() => httpsProxySettings(bad)).toThrow()
   })
   it('como servidor, un error sin capturar se apunta y el proceso termina (una sola vez); una promesa rechazada solo se apunta', () => {
     const proc = new EventEmitter()
