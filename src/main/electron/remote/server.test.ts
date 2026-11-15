@@ -329,6 +329,69 @@ describe('servidor remoto de Aula como servidor (sin ventana)', () => {
   })
 })
 
+describe('opt-in HTTPS reverse proxy, without changing Tailscale', () => {
+  it('requires proxy authentication, HTTPS origin, pairing and secure cookies; keeps admin local', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aula-https-proxy-'))
+    const renderer = join(dir, 'renderer')
+    mkdirSync(renderer, { recursive: true })
+    writeFileSync(join(renderer, 'index.html'), '<!doctype html><html><head></head><body></body></html>')
+    const { DeviceRegistry } = await import('@main/services/remote/devices')
+    const { UploadStore } = await import('@main/services/remote/uploads')
+    const { RemoteServer } = await import('./server')
+    const reg = new DeviceRegistry(join(dir, 'devices.json'))
+    const proxySecret = 's'.repeat(64)
+    const adminToken = 'a'.repeat(43)
+    const srv = new RemoteServer({
+      devices: reg, uploads: new UploadStore(join(dir, 'uploads'), { grant: () => true }),
+      rendererRoot: renderer, language: () => 'en', version: '9.9.9', proxyKey: KEY, host: 'server',
+      external: { origin: 'https://aula.example.test', host: 'aula.example.test', port: 0, secret: proxySecret },
+      admin: { token: adminToken, status: () => ({ server: true }), link: () => null }
+    })
+    await srv.start()
+    const call = (path: string, headers: Record<string, string> = {}, method = 'GET', body?: unknown): Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; text: string }> =>
+      new Promise((resolve, reject) => {
+        const input = body === undefined ? undefined : JSON.stringify(body)
+        const req = request(`http://127.0.0.1:${srv.port}${path}`, {
+          method, headers: { ...headers, ...(input ? { 'content-type': 'application/json' } : {}) }
+        }, (res) => {
+          let text = ''
+          res.setEncoding('utf8')
+          res.on('data', (chunk) => { text += chunk })
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, text }))
+        })
+        req.on('error', reject)
+        req.end(input)
+      })
+    const trusted = { host: 'aula.example.test', 'x-aula-https-proxy-key': proxySecret }
+    try {
+      expect((await call('/health', { host: 'aula.example.test' })).status).toBe(421)
+      expect((await call('/health', { ...trusted, 'x-aula-https-proxy-key': 'wrong' })).status).toBe(421)
+      expect((await call('/health', { ...trusted, host: 'evil.example.test' })).status).toBe(421)
+      expect((await call('/health', trusted)).status).toBe(200)
+      expect((await call('/health', { host: `localhost:${srv.port}` })).status).toBe(200)
+      expect((await call('/health', { host: 'aula-server', 'x-aula-proxy-key': KEY })).status).toBe(200)
+      expect((await call('/pair', { ...trusted, origin: 'https://evil.example.test' })).status).toBe(403)
+
+      const { code } = reg.startPairing({ owner: true })
+      const body = { code, name: 'Browser via WireGuard', platform: 'web' }
+      expect((await call('/pair/complete', { ...trusted, origin: 'https://evil.example.test' }, 'POST', body)).status).toBe(403)
+      const linked = await call('/pair/complete', { ...trusted, origin: 'https://aula.example.test' }, 'POST', body)
+      expect(linked.status).toBe(200)
+      expect(linked.headers['set-cookie']?.[0]).toMatch(/; HttpOnly; SameSite=Strict; Secure$/)
+      const cookie = linked.headers['set-cookie']![0].split(';')[0]
+      const page = await call('/', { ...trusted, cookie })
+      expect(page.status).toBe(200)
+      expect(page.text).toContain('name="aula-device" content="owner"')
+      expect((await call('/rpc', { ...trusted, cookie, origin: 'https://aula.example.test' }, 'POST', { method: 'ai.choices' })).status).toBe(200)
+
+      expect((await call('/admin/status', { ...trusted, authorization: 'Bearer ' + adminToken })).status).toBe(404)
+      expect((await call('/admin/status', { host: `localhost:${srv.port}`, authorization: 'Bearer ' + adminToken })).status).toBe(200)
+    } finally {
+      await srv.stop()
+    }
+  })
+})
+
 describe('servidor remoto en el Mac: sin propietarios, y una ficha caducada corta su flujo', () => {
   let srv: import('./server').RemoteServer
   let reg: import('@main/services/remote/devices').DeviceRegistry

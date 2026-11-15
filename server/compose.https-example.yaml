@@ -1,0 +1,22 @@
+# Optional HTTPS reverse-proxy mode for a headless Aula server.
+# Build AULA_IMAGE from THIS source revision, not from the upstream release image.
+# Fill a private .env; never commit the secret or publish the backend port to the internet.
+services:
+  aula:
+    image: ${AULA_IMAGE:?Set a locally built image from this branch}
+    container_name: aula
+    restart: unless-stopped
+    shm_size: 1gb
+    ports:
+      # Bind only to the VM's private LAN address; firewall to the reverse-proxy host.
+      - "${AULA_BIND_IP:?Set the private VM address}:8080:8080"
+    environment:
+      TZ: ${TZ:-Australia/Sydney}
+      AULA_TAILNET_HOSTNAME: aula-server
+      AULA_HTTPS_ORIGIN: ${AULA_HTTPS_ORIGIN:?Set your HTTPS origin}
+      AULA_HTTPS_PROXY_PORT: "8080"
+      AULA_HTTPS_PROXY_SECRET: ${AULA_HTTPS_PROXY_SECRET:?Set a random secret}
+    volumes:
+      - ${AULA_DATA_DIR:?Set the absolute path to persistent data}:/data
+    security_opt:
+      - no-new-privileges:true

@@ -42,6 +42,30 @@ export function serverHostname(value: string | undefined = process.env.AULA_TAIL
   return isAulaHostname(name) ? name : SERVER_HOSTNAME
 }
 
+/** Opt-in HTTPS reverse-proxy access, in addition to (not instead of) the private Tailscale listener.
+ * The proxy must overwrite X-Aula-HTTPS-Proxy-Key and restrict access to its HTTP upstream.
+ * Fail closed if any part of the configuration is missing or invalid. */
+export function httpsProxySettings(env: NodeJS.ProcessEnv = process.env): { origin: string; host: string; port: number; secret: string } | undefined {
+  const origin = env.AULA_HTTPS_ORIGIN?.trim() ?? ''
+  const portText = env.AULA_HTTPS_PROXY_PORT?.trim() ?? ''
+  const secret = env.AULA_HTTPS_PROXY_SECRET?.trim() ?? ''
+  if (!origin && !portText && !secret) return undefined
+  let url: URL
+  try { url = new URL(origin) } catch { throw new Error('AULA_HTTPS_ORIGIN must be an HTTPS origin without a path') }
+  if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password ||
+      url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('AULA_HTTPS_ORIGIN must be an HTTPS origin without a path')
+  }
+  const port = Number(portText)
+  if (!/^[0-9]+$/.test(portText) || !Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('AULA_HTTPS_PROXY_PORT must be an unprivileged TCP port (1024–65535)')
+  }
+  if (!/^[A-Za-z0-9_-]{43,128}$/.test(secret)) {
+    throw new Error('AULA_HTTPS_PROXY_SECRET must be at least 43 URL-safe random characters')
+  }
+  return { origin, host: url.host.toLowerCase(), port, secret }
+}
+
 /** ¿Es el nombre que se da a sí misma la app de un dispositivo («aula-ipad», o «aula-ipad-2» si ya estaba cogido)? */
 export function isDeviceHostname(name: string): boolean {
   return DEVICE_LABEL.test(hostLabel(name))

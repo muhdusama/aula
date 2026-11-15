@@ -222,10 +222,70 @@ AULA_HOME="$HOME/.local/share/aula-server" ~/aula-server status   # the console,
 
 ## Other ways to reach it
 
-The devices reach the server only over Tailscale. A plain WireGuard tunnel or a reverse proxy in front of Aula is not
-supported: the device linking, the owner check and the apps' discovery all rely on Tailscale knowing which account a
-device belongs to. Tailscale is free for personal use and works through NAT without opening ports; a self-hosted
-control server compatible with Tailscale is not supported yet.
+### HTTPS reverse proxy (opt-in; custom builds)
+
+The standard Tailscale route remains the default. A headless server built with this feature can additionally serve
+the **existing browser/PWA interface** at a private HTTPS origin behind a trusted reverse proxy. With a WireGuard
+tunnel into that private network, the same URL works away from home. The browser still links once with an Aula owner or
+device code and uses its existing revocable device token. The **native iOS and Android apps still use their embedded
+Tailscale nodes**; to use this route on a phone or tablet, open the HTTPS URL in Safari/Chrome and add it to the home
+screen. An ordinary HTTPS reverse proxy does not give Aula a Tailscale user identity.
+
+This mode needs all three variables on the headless server (incomplete settings stop startup rather than removing
+authentication):
+
+| Variable | Example | Purpose |
+| --- | --- | --- |
+| `AULA_HTTPS_ORIGIN` | `https://study.example.test` | Exact HTTPS origin, no path or trailing slash |
+| `AULA_HTTPS_PROXY_PORT` | `8080` | Internal HTTP listener, unprivileged port |
+| `AULA_HTTPS_PROXY_SECRET` | generate with `openssl rand -hex 32` | Secret shared only with your reverse proxy, 43–128 URL-safe characters |
+
+Only when these variables are set does Aula also listen on `0.0.0.0` at the configured port inside the container.
+The ordinary Tailscale route and localhost-only `aula-server status/link` console keep working. The proxy must:
+
+1. Terminate HTTPS using a valid certificate, preserve the configured `Host` and forward the root path unchanged.
+2. **Overwrite** (not forward) the `X-Aula-HTTPS-Proxy-Key` request header with the same secret. Remove untrusted
+   client-supplied `X-Aula-Proxy-Key` and `X-Aula-Tailnet-*` headers. Never expose the secret in client responses.
+3. Forward `/events` without response buffering (streaming) and allow long-lived requests and file uploads.
+4. Expose the HTTPS site **only on the private LAN / WireGuard**, not the public internet. Publish the backend HTTP
+   port only on the server's private interface and firewall it to the reverse proxy's source IP. Protect `/data`
+   and its unencrypted server-side API keys.
+
+A request must use both the configured hostname and secret, or Aula rejects it. Browser requests with an unexpected
+`Origin` are also rejected. A paired device receives a `Secure; HttpOnly; SameSite=Strict` cookie on the HTTPS
+route. The server administration API remains limited to requests from localhost on the host-local HTTP address.
+
+**NGINX Proxy Manager:** Create a Proxy Host for the HTTPS domain, forwarding over HTTP to the VM's private IP and
+`AULA_HTTPS_PROXY_PORT`; enable SSL and Force SSL. In its **Custom Locations** tab, add the root path `/` with the
+same forwarding host and port. In that custom location's advanced NGINX configuration, add:
+
+```nginx
+proxy_set_header X-Aula-HTTPS-Proxy-Key "YOUR_RANDOM_SECRET";
+proxy_set_header X-Aula-Proxy-Key "";
+proxy_set_header X-Aula-Tailnet-User "";
+proxy_set_header X-Aula-Tailnet-Node "";
+proxy_set_header X-Aula-Tailnet-Addr "";
+proxy_buffering off;
+proxy_read_timeout 3600s;
+```
+
+Replace the placeholder with the exact value of `AULA_HTTPS_PROXY_SECRET` on the server. Keep the NGINX Proxy Manager
+access-control and SSL configuration in place. Configure the extra header **inside the custom location**: a
+`proxy_set_header` at the `server` level may not be inherited by NGINX Proxy Manager's generated `location /` block.
+Verify the generated configuration with `nginx -t` and check that `/health` through HTTPS returns
+`{"ok":true,"app":"aula",…}` while direct HTTP requests without the secret return 421.
+
+See [`server/compose.https-example.yaml`](../server/compose.https-example.yaml) for a Compose example using a **bind
+mount**, not a named volume. Supply the values from a private `.env` on the host and substitute an image built
+from the feature branch, **not** `ghcr.io/luumlabs/aula-server:latest` (which has no HTTPS-proxy support). Preserve
+the existing `/data` directory and back it up before switching images. No Tailscale re-pairing is required.
+
+**Security boundary:** the shared proxy secret protects the HTTP upstream, not an arbitrary public HTTPS endpoint;
+pairing codes and device tokens protect Aula user access. A compromised reverse proxy can impersonate the trusted
+upstream. Do not publish this endpoint on the open internet or use it behind an untrusted TLS terminator.
+
+Without this opt-in, the supported access path is still Tailscale, with no exposed ports. A self-hosted Tailscale
+control server is not supported yet.
 
 ## What is verified
 

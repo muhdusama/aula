@@ -1,6 +1,6 @@
 // Servidor remoto de Aula: lo que permite usar Aula desde el iPad o el iPhone del estudiante mientras todo (cursos, IA,
-// datos) sigue en su Mac. Escucha SOLO en este ordenador (127.0.0.1); desde fuera se llega por la red privada de Tailscale
-// del propio estudiante (el proceso auxiliar `aula-tsnet` reenvía las conexiones de sus dispositivos hasta aquí).
+// datos) sigue en su Mac. Por defecto solo escucha en 127.0.0.1 y se llega por la red privada de Tailscale
+// (aula-tsnet). Como servidor, opcionalmente también acepta un proxy HTTPS que comparte una clave aleatoria.
 //  · Sirve la misma interfaz (los archivos de `out/renderer`) con un puente que habla HTTP en vez del IPC de la ventana.
 //  · `/rpc`: los mismos métodos que la ventana, pero solo los de la lista de remote/policy.ts y solo de un dispositivo
 //    emparejado (ficha en una cookie o en `Authorization`).
@@ -26,6 +26,8 @@ export const DEVICE_COOKIE = 'aula_device'
 /** Cabeceras que solo puede poner el proceso auxiliar de Tailscale (con su clave); de un cliente se ignoran. */
 export const PROXY_KEY_HEADER = 'x-aula-proxy-key'
 export const TAILNET_USER_HEADER = 'x-aula-tailnet-user'
+/** The reverse proxy overwrites this header with its configured secret; never pass through a client-supplied value. */
+export const HTTPS_PROXY_KEY_HEADER = 'x-aula-https-proxy-key'
 const MAX_BODY = 2 * 1024 * 1024
 const COOKIE_DAYS = 90
 
@@ -51,6 +53,8 @@ export interface RemoteServerOptions {
   host?: 'mac' | 'server'
   /** La consola del servidor (`/admin/…`), solo en Aula como servidor. */
   admin?: { token: string; status: () => unknown; link: (owner: boolean) => unknown }
+  /** Opt-in reverse proxy entry point; never enabled for a desktop Aula. */
+  external?: { origin: string; host: string; port: number; secret: string }
 }
 
 export class RemoteServer {
@@ -71,7 +75,7 @@ export class RemoteServer {
     server.keepAliveTimeout = 65_000
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
-      server.listen(this.o.port ?? 0, '127.0.0.1', () => { server.off('error', reject); resolve() })
+      server.listen(this.o.external?.port ?? this.o.port ?? 0, this.o.external ? '0.0.0.0' : '127.0.0.1', () => { server.off('error', reject); resolve() })
     })
     this.server = server
     this.port = (server.address() as AddressInfo).port
@@ -128,14 +132,31 @@ export class RemoteServer {
   private viaTailnet(req: IncomingMessage): boolean {
     const got = req.headers[PROXY_KEY_HEADER]
     const key = this.o.proxyKey
-    return typeof got === 'string' && got.length === key.length && timingSafeEqual(Buffer.from(got), Buffer.from(key))
+    return this.loopback(req) && typeof got === 'string' && got.length === key.length && timingSafeEqual(Buffer.from(got), Buffer.from(key))
   }
 
-  /** Sin la clave del proceso auxiliar solo vale una petición a este mismo ordenador (corta el «DNS rebinding»). */
-  private hostAllowed(req: IncomingMessage): boolean {
-    if (this.viaTailnet(req)) return true
+  private loopback(req: IncomingMessage): boolean {
+    return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
+  }
+
+  private localHost(req: IncomingMessage): boolean {
     const host = (req.headers.host ?? '').toLowerCase()
     return host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}` || host === `[::1]:${this.port}`
+  }
+
+  private viaHTTPSProxy(req: IncomingMessage): boolean {
+    const external = this.o.external
+    if (!external || (req.headers.host ?? '').toLowerCase() !== external.host) return false
+    const got = req.headers[HTTPS_PROXY_KEY_HEADER]
+    if (typeof got !== 'string') return false
+    const expected = Buffer.from(external.secret)
+    const supplied = Buffer.from(got)
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected)
+  }
+
+  /** Only local requests, the verified Tailscale sidecar or the configured HTTPS proxy can reach Aula. */
+  private hostAllowed(req: IncomingMessage): boolean {
+    return this.viaTailnet(req) || (this.loopback(req) && this.localHost(req)) || this.viaHTTPSProxy(req)
   }
 
   private get cookieName(): string { return this.o.cookieName ?? DEVICE_COOKIE }
@@ -158,14 +179,18 @@ export class RemoteServer {
     return device ? { device, renew: legacy } : {}
   }
 
-  private deviceCookie(token: string): string {
-    return `${this.cookieName}=${encodeURIComponent(token)}; Path=/; Max-Age=${COOKIE_DAYS * 86_400}; HttpOnly; SameSite=Strict`
+  private deviceCookie(token: string, secure = false): string {
+    return `${this.cookieName}=${encodeURIComponent(token)}; Path=/; Max-Age=${COOKIE_DAYS * 86_400}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`
   }
 
   // MARK: Rutas
 
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.hostAllowed(req)) return this.fail(res, 421, 'forbidden')
+    // Reject cross-origin browser requests even when they reach the trusted reverse proxy.
+    if (this.viaHTTPSProxy(req) && req.headers.origin && req.headers.origin !== this.o.external?.origin) {
+      return this.fail(res, 403, 'forbidden')
+    }
     const url = new URL(req.url ?? '/', 'http://aula')
     const path = url.pathname
     const method = req.method ?? 'GET'
@@ -194,7 +219,7 @@ export class RemoteServer {
 
     const { device, renew } = this.device(req)
     // llegó con la cookie de antes: se le da la de esta instalación (la vieja se queda para la otra Aula que la use)
-    if (device && renew) res.setHeader('set-cookie', this.deviceCookie(renew))
+    if (device && renew) res.setHeader('set-cookie', this.deviceCookie(renew, this.viaHTTPSProxy(req)))
     if (path === '/rpc' && method === 'POST') return device ? this.rpc(req, res, device) : this.fail(res, 401, 'forbidden')
     if (path === '/events' && method === 'GET') return device ? this.events(req, res, device) : this.fail(res, 401, 'forbidden')
     if (path.startsWith('/asset/')) return device ? this.asset(req, res, path) : this.fail(res, 401, 'forbidden')
@@ -208,7 +233,8 @@ export class RemoteServer {
   private async admin(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
     const admin = this.o.admin
     const auth = req.headers.authorization ?? ''
-    const ok = !!admin && !this.viaTailnet(req) && auth.startsWith('Bearer ') && auth.length - 7 === admin.token.length && timingSafeEqual(Buffer.from(auth.slice(7)), Buffer.from(admin.token))
+    const ok = !!admin && this.loopback(req) && this.localHost(req) && !this.viaTailnet(req) && !this.viaHTTPSProxy(req) &&
+      auth.startsWith('Bearer ') && auth.length - 7 === admin.token.length && timingSafeEqual(Buffer.from(auth.slice(7)), Buffer.from(admin.token))
     if (!ok) return this.fail(res, 404, 'not_found')
     if (path === '/admin/status' && method === 'GET') return this.json(res, 200, { ok: true, value: admin.status() })
     if (path === '/admin/link' && method === 'POST') {
@@ -228,7 +254,7 @@ export class RemoteServer {
       const r = this.o.devices.completePairing(String(b.code ?? ''), String(b.name ?? ''), String(b.platform ?? 'web'))
       this.o.onChange?.()
       this.json(res, 200, { ok: true, token: r.token, device: r.device }, {
-        'set-cookie': this.deviceCookie(r.token),
+        'set-cookie': this.deviceCookie(r.token, this.viaHTTPSProxy(req)),
         'cache-control': 'no-store'
       })
     } catch (err) {
